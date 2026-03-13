@@ -286,12 +286,46 @@ def transform_data(df_usage: pd.DataFrame, df_mapping: pd.DataFrame):
     Normalise wide-format usage data into a long time-series,
     join with tenant mapping, and compute derived metrics.
     """
+    # ── Normalize column names: strip whitespace ──────────────────
+    df_usage.columns = df_usage.columns.astype(str).str.strip()
+    if not df_mapping.empty:
+        df_mapping.columns = df_mapping.columns.astype(str).str.strip()
+
+    # ── Auto-detect fixed (non-date) columns ──────────────────────
+    # First 3 non-date columns are treated as fixed identifiers
+    # A column is a "date column" if it can be parsed as a date
+    def is_date_col(col_name):
+        try:
+            pd.to_datetime(col_name)
+            return True
+        except Exception:
+            return False
+
+    all_cols = list(df_usage.columns)
+    date_cols = [c for c in all_cols if is_date_col(str(c))]
+    fixed_cols = [c for c in all_cols if c not in date_cols]
+
+    # Standardise fixed column names for downstream use
+    col_rename = {}
+    for col in fixed_cols:
+        lower = col.lower().replace('_', ' ').strip()
+        if 'tenant' in lower:
+            col_rename[col] = 'Tenant Name'
+        elif 'connector' in lower:
+            col_rename[col] = 'Connector Name'
+        elif 'oid' in lower:
+            col_rename[col] = 'OID'
+
+    df_usage = df_usage.rename(columns=col_rename)
+    fixed_cols = [col_rename.get(c, c) for c in fixed_cols]
+
+    # Ensure all expected fixed cols exist
+    for req in ['Tenant Name', 'Connector Name', 'OID']:
+        if req not in df_usage.columns:
+            df_usage[req] = 'Unknown'
     fixed_cols = ['Tenant Name', 'Connector Name', 'OID']
 
-    # Identify date columns (everything that's not a fixed column)
-    date_cols = [c for c in df_usage.columns if c not in fixed_cols]
-
-    # Melt to long format
+    # ── Melt to long format ───────────────────────────────────────
     df_long = df_usage.melt(
         id_vars=fixed_cols,
         value_vars=date_cols,
@@ -310,20 +344,30 @@ def transform_data(df_usage: pd.DataFrame, df_mapping: pd.DataFrame):
     df_long['Week'] = df_long['Date'].dt.isocalendar().week
     df_long['DayOfWeek'] = df_long['Date'].dt.day_name()
 
-    # Join with mapping
-    if not df_mapping.empty and 'OID' in df_mapping.columns:
-        merge_cols = ['OID']
-        extra_cols = [c for c in df_mapping.columns if c not in fixed_cols + merge_cols]
-        df_long = df_long.merge(
-            df_mapping[['OID'] + extra_cols],
-            on='OID',
-            how='left',
-            suffixes=('', '_mapped'),
-        )
-        # Fill Customer Email if column exists
-        if 'Customer Email' not in df_long.columns:
-            df_long['Customer Email'] = 'N/A'
-    else:
+    # ── Join with mapping ─────────────────────────────────────────
+    if not df_mapping.empty:
+        # Normalize mapping column names
+        map_rename = {}
+        for col in df_mapping.columns:
+            lower = str(col).lower().replace('_', ' ').strip()
+            if 'tenant' in lower:
+                map_rename[col] = 'Tenant Name'
+            elif 'email' in lower:
+                map_rename[col] = 'Customer Email'
+            elif 'oid' in lower:
+                map_rename[col] = 'OID'
+        df_mapping = df_mapping.rename(columns=map_rename)
+
+        if 'OID' in df_mapping.columns:
+            extra_cols = [c for c in df_mapping.columns if c not in ['OID', 'Tenant Name', 'Connector Name']]
+            df_long = df_long.merge(
+                df_mapping[['OID'] + extra_cols],
+                on='OID',
+                how='left',
+                suffixes=('', '_mapped'),
+            )
+
+    if 'Customer Email' not in df_long.columns:
         df_long['Customer Email'] = 'N/A'
 
     df_long = df_long.sort_values('Date').reset_index(drop=True)
